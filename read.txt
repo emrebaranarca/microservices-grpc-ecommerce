@@ -1,0 +1,73 @@
+### Genel mimari
+- **product-service (HTTP/REST, 8081)**: Müşteriden gelen indirim hesaplama isteğini alır. gRPC istemcisi olarak davranıp diğer servise sorar. Ürün/kategori veritabanı bu servistedir.
+- **discount-service (gRPC, 9090 / Spring Boot 8082)**: İndirim kodu ve kategoriye göre indirim tutarını hesaplar. İndirim ve kategori veritabanı bu servistedir.
+- **Veritabanları**: Her servis kendi Postgres’ine bağlıdır. `product-service` tarafındaki kategori ile `discount-service` tarafındaki kategori, `external_id` üzerinden eşleşir.
+
+### Başlangıç (startup)
+1) Her iki servis Spring Boot ile açılır, kendi Postgres’ine Hikari pool üzerinden bağlanır.
+2) `discount-service` gRPC sunucusunu 9090 portunda yayımlar ve `DiscountService` RPC’sini kaydeder.
+3) `product-service`, `application.properties`’ten gRPC host/port’u okur ve `ManagedChannel` + `BlockingStub` hazırlar.
+4) Her iki DB’ye örnek veriler `data.sql` ile yüklenir (dev senaryosu).
+
+### İstek akışı (adım adım)
+1) Müşteri, e-ticaret uygulamasında indirim kodu girer. UI/Backend, `product-service`’e HTTP isteği atar:
+   - Endpoint: `POST /api/discounts/calculate`
+   - Gövde: `code`, `price`, `externalCategoryId`
+
+2) `product-service` içindeki `DiscountController`, gelen DTO’yu `Discount.proto`’ya uygun `DiscountRequest`’e çevirir.
+
+3) `product-service` gRPC istemcisi, `DiscountService/getDiscount` RPC çağrısını `discount-service`’e yapar:
+   - Kanal: `localhost:9090` (dev), prod’da servis DNS’i.
+   - Çağrı tipi: blocking (senkron).
+
+4) `discount-service` gRPC sunucusu isteği alır:
+   - `externalCategoryId` ile kendi DB’sinde `Category` bulur.
+   - İlgili kategoriye bağlı `Discount` kaydını (kuponu) `code` ile arar.
+   - Bulursa: `newPrice = price - discountPrice` (0’ın altına düşmez).
+   - Bulamazsa: `newPrice = price`, `response.statusCode=false`, `message="Invalid discount code"`.
+
+5) `discount-service`, `DiscountResponse` döner; `product-service` yanıtı alır ve HTTP için DTO’ya çevirir.
+
+6) `product-service` HTTP 200 ile sonuç döner:
+   - `oldPrice`, `newPrice`, `code`, `response.statusCode`, `response.message`.
+
+### Verinin anlamı ve nerede “düşüyor”?
+- Bu akışta indirim “hesaplanır” ve sonuç döndürülür; ürün tablosundaki temel fiyat değiştirilmez.
+- E-ticaret uygulamalarında indirim, genellikle sepette/checkout’ta geçici olarak uygulanır; sipariş fiyatı buna göre hesaplanır. Ürünün “liste fiyatı” sabit kalır.
+- İhtiyaç varsa, sepet/checkout servisi bu yanıtı kullanarak satır kalemi tutarlarını günceller; kalıcı bir “order total” oluşturur.
+
+### Hata durumları
+- **Kategori bulunamazsa**: `discount-service` hata üretir (gRPC INTERNAL); `product-service` bu hatayı HTTP 5xx olarak yüzeye yansıtabilir.
+- **Geçersiz kupon**: Başarılı HTTP/gRPC yanıtı gelir ama `statusCode=false` ve `newPrice=oldPrice` olur.
+- **Bağlantı sorunu**: gRPC kanalında hata → `product-service` tarafında exception fırlar (şu an özel handling yok).
+
+### Protokoller ve portlar
+- HTTP/REST: `product-service` 8081.
+- gRPC: `discount-service` 9090. (Spring Boot 8082’de de çalışır ama gRPC 9090’dadır.)
+- Veritabanları: `product-service` → `54322`, `discount-service` → `54323`.
+
+### Mesaj şeması (özet)
+- gRPC `DiscountRequest`: `code` (string), `price` (float), `externalCategoryId` (int64).
+- gRPC `DiscountResponse`: `code`, `oldPrice`, `newPrice`, `response{statusCode(bool), message(string)}`.
+
+### Örnek akış çıktısı
+- İstek (HTTP):
+```json
+{"code":"SAVE10","price":100.0,"externalCategoryId":1}
+```
+- gRPC yanıtı (içeriden):
+```json
+{"code":"SAVE10","newPrice":90.0,"oldPrice":100.0,"response":{"statusCode":true,"message":"Discount applied successfully"}}
+```
+- HTTP yanıtı (müşteriye):
+```json
+{"code":"SAVE10","newPrice":90.0,"oldPrice":100.0,"response":{"statusCode":true,"message":"Discount applied successfully"}}
+```
+
+- Üst seviye akış:
+  - **Client → product-service (HTTP)** → DTO → gRPC `DiscountRequest` →
+  - **product-service → discount-service (gRPC)** → DB sorguları → indirim hesaplama →
+  - **discount-service → product-service (gRPC yanıt)** → HTTP DTO →
+  - **product-service → Client (HTTP yanıt)**.
+
+- Bu mimaride indirim “uygulanmış fiyat” yanıt olarak döner; kalıcı fiyat değişikliği yapılmaz. Kalıcılaştırma gerekiyorsa, o iş mantığı sepet/checkout/sipariş servisinde yapılır.
