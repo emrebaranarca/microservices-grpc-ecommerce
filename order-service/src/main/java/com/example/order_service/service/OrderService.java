@@ -13,6 +13,8 @@ import com.example.order_service.model.Order;
 import com.example.order_service.model.OrderItem;
 import com.example.order_service.repository.OrderRepository;
 import com.example.order_service.service.grpc.DiscountService;
+import com.example.order_service.messaging.OrderCreatedEvent;
+import com.example.order_service.messaging.OrderEventPublisher;
 
 import lombok.RequiredArgsConstructor;
 
@@ -22,6 +24,7 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final DiscountService discountService;
+    private final OrderEventPublisher orderEventPublisher;
 
     public List<Order> getAllOrders() {
         return orderRepository.findAll();
@@ -52,7 +55,18 @@ public class OrderService {
         }
 
         order.setTotalPrice(total);
-        return orderRepository.save(order);
+        Order saved = orderRepository.save(order);
+
+        OrderCreatedEvent event = OrderCreatedEvent.builder()
+                .orderId(saved.getId())
+                .customerId(saved.getCustomerId())
+                .customerEmail(saved.getCustomerEmail())
+                .totalPrice(saved.getTotalPrice())
+                .createdAt(saved.getCreatedAt())
+                .build();
+        orderEventPublisher.publishOrderCreated(event);
+
+        return saved;
     }
 }
 

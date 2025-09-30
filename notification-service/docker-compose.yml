@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: notification_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: notification_mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  notification-service:
+    build:
+      context: .
+    container_name: notification-service
+    depends_on:
+      - rabbitmq
+      - mailhog
+    environment:
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_MAIL_HOST=mailhog
+      - SPRING_MAIL_PORT=1025
+    ports:
+      - "8084:8084"
